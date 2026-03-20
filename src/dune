@@ -3,7 +3,8 @@
 (library
   (public_name goblint-cil)
   (name goblintCil)
-  (libraries zarith unix str stdlib-shims)
+  (libraries zarith unix str stdlib-shims yojson ppx_deriving_yojson.runtime)
+  (preprocess (pps ppx_deriving_yojson))
   (modules (:standard \ main mainFeature ciloptions machdepConfigure machdepArchConfigure modelConfigure))
 )
 

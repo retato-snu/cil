@@ -55,7 +55,7 @@ type cabsloc = {
  endLineno: int;
  endByteno: int;
  endColumnno: int;
-}
+} [@@deriving yojson]
 
 type typeSpecifier = (* Merge all specifiers into one type *)
     Tvoid                             (* Type specifier ISO 6.7.2 *)
@@ -323,4 +323,4 @@ and initwhat =
 
                                         (* Each attribute has a name and some
                                            optional arguments *)
-and attribute = string * expression list
+and attribute = string * expression list [@@deriving yojson]

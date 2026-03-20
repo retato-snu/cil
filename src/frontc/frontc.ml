@@ -43,6 +43,7 @@ open Pretty
 (* Output management *)
 let out : out_channel option ref = ref None
 let close_me = ref false
+let jsonOutput : string option ref = ref None
 
 let close_output _ =
   match !out with
@@ -55,12 +56,14 @@ let close_output _ =
 
 let set_output filename =
   close_output ();
-  let out_chan = try open_out filename
-    with Sys_error msg ->
-    (output_string stderr ("Error while opening output: " ^ msg); exit 1) in
+  let out_chan =
+    if filename = "-" then stdout
+    else try open_out filename
+      with Sys_error msg ->
+      (output_string stderr ("Error while opening output: " ^ msg); exit 1) in
   out := Some out_chan;
   Whitetrack.setOutput out_chan;
-  close_me := true
+  close_me := filename <> "-"
 
 
 (* filename for patching *)
@@ -101,6 +104,8 @@ let args : (string * Arg.spec * string) list =
              " print prototypes to safec.proto.h after parsing";
   "--printNotice", Arg.Set printNotice,
              " include a comment saying printed by FrontC";
+  "--cabsjson", Arg.String (fun s -> jsonOutput := Some s),
+             "<fname> CABS JSON output file name";
 ]
 
 exception ParseError of string
@@ -155,7 +160,6 @@ begin
     | None -> cabs
   in
 
-  (* print it ... *)
   (match !out with
     Some o -> begin
       (trace "sm" (dprintf "writing the cabs output\n"));
@@ -165,6 +169,13 @@ begin
       raise CabsOnly
     end
   | None -> ());
+  (match !jsonOutput with
+    Some fname ->
+      let oc = if fname = "-" then stdout else open_out fname in
+      Yojson.Safe.pretty_to_channel oc (Cabs.file_to_yojson patched);
+      output_string oc "\n";
+      if fname <> "-" then close_out oc
+    | None -> ());
   if !E.hadErrors then
     raise Parsing.Parse_error;
 
