@@ -4930,6 +4930,18 @@ let newVID () =
   incr nextGlobalVID;
   t
 
+let get_next_global_vid () =
+  !nextGlobalVID
+
+let set_next_global_vid value =
+  nextGlobalVID := value
+
+let get_next_compinfo_key () =
+  !nextCompinfoKey
+
+let set_next_compinfo_key value =
+  nextCompinfoKey := value
+
    (* Make a varinfo. Used mostly as a helper function below  *)
 let makeVarinfo global name ?init typ =
   (* Strip const from type for locals *)
@@ -5095,6 +5107,15 @@ let dummyFile =
     fileName = "<dummy>";
     globinit = None;
     globinitcalled = false;}
+
+let initialNextGlobalVID = !nextGlobalVID
+let initialNextCompinfoKey = !nextCompinfoKey
+
+let get_initial_next_global_vid () =
+  initialNextGlobalVID
+
+let get_initial_next_compinfo_key () =
+  initialNextCompinfoKey
 
 (***** Load and store files as unmarshalled Ocaml binary data. ****)
 type savedFile =
@@ -6494,11 +6515,21 @@ let copyFunction (f: fundec) (newname: string) : fundec =
 
 (********* Compute the CFG ********)
 let sid_counter = ref 0
+let initial_sid_counter = !sid_counter
 
 let new_sid () =
   let id = !sid_counter in
   incr sid_counter;
   id
+
+let get_initial_sid_counter () =
+  initial_sid_counter
+
+let get_sid_counter () =
+  !sid_counter
+
+let set_sid_counter value =
+  sid_counter := value
 
 let statements : stmt list ref = ref []
 (* Clear all info about the CFG in statements *)
