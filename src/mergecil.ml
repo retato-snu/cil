@@ -1402,6 +1402,16 @@
                else if prevInitOpt = None then
                  (* We have an initializer, but the previous one didn't. We should really convert the previous global from GVar to GVarDecl, but that's not convenient to do here. *)
                  mergePushGlobals (visitCilGlobal renameVisitor (GVar (vi', init, l)))
+               else if !ignore_merge_conflicts then
+                 (* Both GVars have initializers but they differ. Instead of
+                    aborting the whole merge (fatal), warn and keep the FIRST
+                    definition already recorded in emittedVarDefn (drop this
+                    one) -- linker "first strong symbol wins" semantics. Use
+                    `warn` (not `error`) so Errormsg.hadErrors stays unset and
+                    the frontend does not abort after merge. This turns the
+                    294-TU Linux merge (many duplicate `*_operations` tables)
+                    from a total abort into a completed merge with a warn trail. *)
+                 ignore (warn "global var %s at %a has different initializer than the one at %a; keeping the first, dropping this one" vi'.vname d_loc l d_loc prevLoc)
                else
                  (* Both GVars have initializers. *)
                  E.s (error "global var %s at %a has different initializer than %a" vi'.vname d_loc l d_loc prevLoc)
