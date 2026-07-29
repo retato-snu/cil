@@ -66,6 +66,144 @@
  let mergeInlinesRepeat () = !merge_inlines && true
  let mergeInlinesWithAlphaConvert () = !merge_inlines && true
 
+ (* This side table observes pass-2 decisions without modifying CIL objects.
+    In particular, no marker attributes are planted: doing so would feed back
+    into the equality checks that this log is meant to observe. *)
+ type provenance_item_kind =
+   | Variable_declaration
+   | Variable_definition
+   | Function_definition
+
+ type merged_provenance_item = {
+   provenance_merged_global_index : int;
+   provenance_merged_chain_index : int;
+   provenance_merged_initializer_index : int option;
+   provenance_merged_name : string;
+   provenance_merged_kind : provenance_item_kind;
+   provenance_merged_location : location;
+ }
+
+ type provenance_outcome =
+   | Merged_item of merged_provenance_item
+   | Dropped_item
+
+ type provenance_row = {
+   provenance_input_index : int;
+   provenance_input_file : string;
+   provenance_original_global_index : int;
+   provenance_original_chain_index : int;
+   provenance_original_initializer_index : int option;
+   provenance_original_name : string;
+   provenance_original_kind : provenance_item_kind;
+   provenance_original_location : location;
+   provenance_outcome : provenance_outcome;
+ }
+
+ type pending_provenance_outcome =
+   | Pending_merged_item of global
+   | Pending_dropped_item
+
+ type pending_provenance_row = {
+   pending_input_index : int;
+   pending_input_file : string;
+   pending_original_global_index : int;
+   pending_original_chain_index : int;
+   pending_original_initializer_index : int option;
+   pending_original_name : string;
+   pending_original_kind : provenance_item_kind;
+   pending_original_location : location;
+   pending_outcome : pending_provenance_outcome;
+ }
+
+ let provenance_recording = ref true
+ let pending_provenance_rows : pending_provenance_row list ref = ref []
+ let completed_provenance_rows : provenance_row list ref = ref []
+ let provenance_rows () = !completed_provenance_rows
+
+ let provenance_item = function
+   | GVarDecl (vi, loc) ->
+       Some (Variable_declaration, vi.vname, loc, false)
+   | GVar (vi, init, loc) ->
+       Some (Variable_definition, vi.vname, loc, init.init <> None)
+   | GFun (fundec, loc) ->
+       Some (Function_definition, fundec.svar.vname, loc, false)
+   | GType _ | GCompTag _ | GCompTagDecl _ | GEnumTag _
+   | GEnumTagDecl _ | GAsm _ | GPragma _ | GText _ -> None
+
+ let record_provenance_decision ~input_index ~input_file
+     ~original_global_index ~original_chain_index
+     ~original_initializer_index ~original_name ~original_kind
+     ~original_location outcome =
+   if !provenance_recording then
+     pending_provenance_rows :=
+       { pending_input_index = input_index;
+         pending_input_file = input_file;
+         pending_original_global_index = original_global_index;
+         pending_original_chain_index = original_chain_index;
+         pending_original_initializer_index = original_initializer_index;
+         pending_original_name = original_name;
+         pending_original_kind = original_kind;
+         pending_original_location = original_location;
+         pending_outcome = outcome }
+       :: !pending_provenance_rows
+
+ let finish_provenance globals =
+   if not !provenance_recording then
+     completed_provenance_rows := []
+   else begin
+     let _, _, _, merged_items =
+       List.fold_left
+         (fun (global_index, chain_index, initializer_index, items) global ->
+            match provenance_item global with
+            | None -> global_index + 1, chain_index, initializer_index, items
+            | Some (kind, name, loc, has_initializer) ->
+              let chain_index = chain_index + 1 in
+              let initializer_index, initializer_slot =
+                if has_initializer then
+                  let index = initializer_index + 1 in
+                  index, Some index
+                else initializer_index, None
+              in
+              let item =
+                { provenance_merged_global_index = global_index;
+                  provenance_merged_chain_index = chain_index;
+                  provenance_merged_initializer_index = initializer_slot;
+                  provenance_merged_name = name;
+                  provenance_merged_kind = kind;
+                  provenance_merged_location = loc }
+              in
+              global_index + 1, chain_index, initializer_index,
+              (global, item) :: items)
+         (0, -1, -1, []) globals
+     in
+     let outcome = function
+       | Pending_dropped_item -> Dropped_item
+       | Pending_merged_item global ->
+         (match
+            List.find_opt (fun (candidate, _) -> candidate == global)
+              merged_items
+          with
+          | Some (_, item) -> Merged_item item
+          | None -> Dropped_item)
+     in
+     completed_provenance_rows :=
+       !pending_provenance_rows
+       |> List.rev
+       |> List.map (fun row ->
+              { provenance_input_index = row.pending_input_index;
+                provenance_input_file = row.pending_input_file;
+                provenance_original_global_index =
+                  row.pending_original_global_index;
+                provenance_original_chain_index =
+                  row.pending_original_chain_index;
+                provenance_original_initializer_index =
+                  row.pending_original_initializer_index;
+                provenance_original_name = row.pending_original_name;
+                provenance_original_kind = row.pending_original_kind;
+                provenance_original_location = row.pending_original_location;
+                provenance_outcome = outcome row.pending_outcome })
+   end
+
  (* when true, merge duplicate definitions of externally-visible functions;
     this uses a mechanism which is faster than the one for inline functions,
     but only probabilistically accurate *)
@@ -1338,7 +1476,43 @@
    (* Keep a pointer to the contents of the file so far *)
    let savedTheFile = !theFile in
 
+   let source_global_index = ref (-1) in
+   let source_chain_index = ref (-1) in
+   let source_initializer_index = ref (-1) in
+
    let processOneGlobal (g : global) : unit =
+     incr source_global_index;
+     let provenance =
+       match provenance_item g with
+       | None -> None
+       | Some (kind, name, loc, has_initializer) ->
+         incr source_chain_index;
+         let initializer_index =
+           if has_initializer then begin
+             incr source_initializer_index;
+             Some !source_initializer_index
+           end else None
+         in
+         Some
+           (!currentFidx, H.find fileNames !currentFidx,
+            !source_global_index, !source_chain_index, initializer_index,
+            name, kind, loc)
+     in
+     let record outcome =
+       match provenance with
+       | None -> ()
+       | Some (input_index, input_file, original_global_index,
+               original_chain_index, original_initializer_index,
+               original_name, original_kind, original_location) ->
+         record_provenance_decision ~input_index ~input_file
+           ~original_global_index ~original_chain_index
+           ~original_initializer_index ~original_name ~original_kind
+           ~original_location outcome
+     in
+     let record_emitted = function
+       | global :: _ -> record (Pending_merged_item global)
+       | [] -> record Pending_dropped_item
+     in
      (* Process a varinfo. Reuse an old one, or rename it if necessary *)
      let processVarinfo ~isadef (vi : varinfo) (vloc : location) : varinfo =
        if vi.vreferenced then vi (* Already done *)
@@ -1375,14 +1549,17 @@
            currentLoc := l;
            incr currentDeclIdx;
            let vi' = processVarinfo ~isadef:false vi l in
-           if vi != vi' then (* Drop this declaration *) ()
+           if vi != vi' then (* Drop this declaration *)
+             record Pending_dropped_item
            else if H.mem emittedVarDecls vi'.vname then
              (* No need to keep it *)
-             ()
+             record Pending_dropped_item
            else (
              H.add emittedVarDecls vi'.vname true;
              (* Remember that we emitted it *)
-             mergePushGlobals (visitCilGlobal renameVisitor g))
+             let emitted = visitCilGlobal renameVisitor g in
+             mergePushGlobals emitted;
+             record_emitted emitted)
        | GVar (vi, init, l) ->
            currentLoc := l;
            incr currentDeclIdx;
@@ -1394,20 +1571,35 @@
              | None ->
                (* no previous definition *)
                H.add emittedVarDefn vi'.vname (vi', init.init, l);
-               mergePushGlobals (visitCilGlobal renameVisitor (GVar (vi', init, l)))
+               let emitted =
+                 visitCilGlobal renameVisitor (GVar (vi', init, l))
+               in
+               mergePushGlobals emitted;
+               record_emitted emitted
              | Some (prevVar, prevInitOpt, prevLoc) ->
                if equalInitOpts prevInitOpt init.init || init.init = None then
-                 trace "mergeGlob" (P.dprintf "dropping global var %s at %a in favor of the one at %a\n" vi'.vname d_loc l d_loc prevLoc)
+                 begin
+                   trace "mergeGlob" (P.dprintf "dropping global var %s at %a in favor of the one at %a\n" vi'.vname d_loc l d_loc prevLoc);
+                   record Pending_dropped_item
+                 end
                  (* do not emit *)
                else if prevInitOpt = None then
                  (* We have an initializer, but the previous one didn't. We should really convert the previous global from GVar to GVarDecl, but that's not convenient to do here. *)
-                 mergePushGlobals (visitCilGlobal renameVisitor (GVar (vi', init, l)))
+                 let emitted =
+                   visitCilGlobal renameVisitor (GVar (vi', init, l))
+                 in
+                 mergePushGlobals emitted;
+                 record_emitted emitted
                else
                  (* Both GVars have initializers. *)
                  E.s (error "global var %s at %a has different initializer than %a" vi'.vname d_loc l d_loc prevLoc)
            else
              (* Not merging globals, nothing to be done*)
-             mergePushGlobals (visitCilGlobal renameVisitor (GVar (vi', init, l)))
+             let emitted =
+               visitCilGlobal renameVisitor (GVar (vi', init, l))
+             in
+             mergePushGlobals emitted;
+             record_emitted emitted
        | GFun (fdec, l) as g ->
            currentLoc := l;
            incr currentDeclIdx;
@@ -1459,12 +1651,13 @@
                   we can find the replacement name. *)
                fdec'.svar.vreferenced <- false;
                fdec'.svar.vname <- origname;
-               ()
+               record Pending_dropped_item
                (* Drop this definition *)
              with Not_found ->
                if debugInlines then ignore (E.log " Not found\n");
                H.add inlineBodies printout inode;
-               mergePushGlobal g')
+               mergePushGlobal g';
+               record (Pending_merged_item g'))
            else if mergeGlobals && not (fdec'.svar.vstorage = Static || fdec'.svar.vinline) then ( (* !merge_inlines is false here anyway *)
              (* either the function is not inline, or we're not attempting to  merge inlines *)
              (* sm: this is a non-inline, non-static function. I want to consider dropping it if a same-named function has already been put into the merged file *)
@@ -1474,22 +1667,29 @@
              | None ->
                (* there was no previous definition *)
                mergePushGlobal g';
-               H.add emittedFunDefn fdec'.svar.vname (fdec', l, sum)
+               H.add emittedFunDefn fdec'.svar.vname (fdec', l, sum);
+               record (Pending_merged_item g')
              | Some (prevFun, prevLoc, prevSum) ->
                (* previous was found *)
-               if sum = prevSum then
-                 trace "mergeGlob" (P.dprintf "dropping duplicate def'n of func %s at %a in favor of that at %a\n" fdec'.svar.vname d_loc l d_loc prevLoc)
-               else
+               if sum = prevSum then begin
+                 trace "mergeGlob" (P.dprintf "dropping duplicate def'n of func %s at %a in favor of that at %a\n" fdec'.svar.vname d_loc l d_loc prevLoc);
+                 record Pending_dropped_item
+               end else begin
                  (* the checksums differ, so print a warning but keep the older one to avoid a link error later. *)
                  (* I think this is a reasonable approximation of what ld does. *)
                  ignore (warn
                       "def'n of func %s at %a (sum %d) conflicts with the one at %a (sum %d); keeping the one at %a."
                       fdec'.svar.vname d_loc l sum d_loc prevLoc prevSum d_loc
-                      prevLoc)
+                      prevLoc);
+                 record Pending_dropped_item
+               end
             )
            else
              (* not attempting to merge global functions, or it was static or inline *)
-             mergePushGlobal g'
+             begin
+               mergePushGlobal g';
+               record (Pending_merged_item g')
+             end
        | GCompTag (ci, l) as g -> (
            currentLoc := l;
            incr currentDeclIdx;
@@ -1650,6 +1850,8 @@
           inlinesToRemove *))
 
  let merge (files : file list) (newname : string) : file =
+   pending_provenance_rows := [];
+   completed_provenance_rows := [];
    init ();
 
    (* Make the first pass over the files *)
@@ -1697,6 +1899,7 @@
        globinitcalled = false;
      }
    in
+   finish_provenance res.globals;
    init ();
    (* Make the GC happy *)
    (* We have made many renaming changes and sometimes we have just guessed a
